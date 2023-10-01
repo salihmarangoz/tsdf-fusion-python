@@ -83,7 +83,7 @@ class TSDFVolume:
           int vol_dim_x = (int) vol_dim[0];
           int vol_dim_y = (int) vol_dim[1];
           int vol_dim_z = (int) vol_dim[2];
-          if (voxel_idx > vol_dim_x*vol_dim_y*vol_dim_z)
+          if (voxel_idx >= vol_dim_x*vol_dim_y*vol_dim_z)
               return;
           // Get voxel grid coordinates (note: be careful when casting)
           float voxel_x = floorf(((float)voxel_idx)/((float)(vol_dim_y*vol_dim_z)));
@@ -118,7 +118,7 @@ class TSDFVolume:
           float depth_diff = depth_value-cam_pt_z;
           if (depth_diff < -trunc_margin)
               return;
-          float dist = fmin(1.0f,depth_diff/trunc_margin);
+          float dist = -fmin(1.0f,depth_diff/trunc_margin);
           float w_old = weight_vol[voxel_idx];
           float obs_weight = other_params[5];
           float w_new = w_old + obs_weight;
@@ -304,7 +304,7 @@ class TSDFVolume:
     tsdf_vol, color_vol = self.get_volume()
 
     # Marching cubes
-    verts = measure.marching_cubes_lewiner(tsdf_vol, level=0)[0]
+    verts = measure.marching_cubes(tsdf_vol, mask=np.logical_and(tsdf_vol > -0.5,tsdf_vol < 0.5), level=0, method='lewiner')[0]
     verts_ind = np.round(verts).astype(int)
     verts = verts*self._voxel_size + self._vol_origin
 
@@ -325,7 +325,7 @@ class TSDFVolume:
     tsdf_vol, color_vol = self.get_volume()
 
     # Marching cubes
-    verts, faces, norms, vals = measure.marching_cubes_lewiner(tsdf_vol, level=0)
+    verts, faces, norms, vals = measure.marching_cubes(tsdf_vol, mask=np.logical_and(tsdf_vol > -0.5,tsdf_vol < 0.5), level=0, method='lewiner')
     verts_ind = np.round(verts).astype(int)
     verts = verts*self._voxel_size+self._vol_origin  # voxel grid coordinates to world coordinates
 
