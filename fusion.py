@@ -1,18 +1,10 @@
 # Copyright (c) 2018 Andy Zeng
 
 import numpy as np
-
-from numba import njit, prange
-from skimage import measure
-
-try:
-  import pycuda.driver as cuda
-  import pycuda.autoinit
-  from pycuda.compiler import SourceModule
-except Exception as err:
-  print('Warning: {}'.format(err))
-  print('Failed to import PyCUDA. Running fusion in CPU mode.')
-
+from skimage.measure import marching_cubes
+import pycuda.driver as cuda
+import pycuda.autoinit
+from pycuda.compiler import SourceModule
 
 class TSDFVolume:
   """Volumetric TSDF Fusion of RGB-D Images.
@@ -113,7 +105,6 @@ class TSDFVolume:
         int voxel_z = voxel_idx-voxel_x*vol_dim_y*vol_dim_z-voxel_y*vol_dim_z;
 
         // Voxel grid coordinates to world coordinates
-        
         float pt_x = vol_origin[0]+voxel_x*voxel_size;
         float pt_y = vol_origin[1]+voxel_y*voxel_size;
         float pt_z = vol_origin[2]+voxel_z*voxel_size;
@@ -127,8 +118,6 @@ class TSDFVolume:
         float cam_pt_z = cam_pose[0*4+2]*tmp_pt_x + cam_pose[1*4+2]*tmp_pt_y + cam_pose[2*4+2]*tmp_pt_z;
 
         // Camera coordinates to image pixels
-        //int pixel_x = (int) roundf(cam_intr[0*3+0]*(cam_pt_x/cam_pt_z)+cam_intr[0*3+2]);
-        //int pixel_y = (int) roundf(cam_intr[1*3+1]*(cam_pt_y/cam_pt_z)+cam_intr[1*3+2]);
         int pixel_x = (int) roundf(cam_intr_0*(cam_pt_x/cam_pt_z)+cam_intr_2);
         int pixel_y = (int) roundf(cam_intr_4*(cam_pt_y/cam_pt_z)+cam_intr_5);
         
@@ -152,6 +141,7 @@ class TSDFVolume:
         tsdf_vol[voxel_idx] = (tsdf_vol[voxel_idx]*w_old+obs_weight*dist)/w_new;
 
         // Integrate color
+        // TODO: pixel_x,pixel_y are quantized. Use interpolation instead.
         float old_color = color_vol[voxel_idx];
         float old_b = floorf(old_color/(256*256));
         float old_g = floorf((old_color-old_b*256*256)/256);
@@ -165,14 +155,6 @@ class TSDFVolume:
         new_b = fmin(roundf((old_b*w_old+obs_weight*new_b)/w_new),255.0f);
         new_g = fmin(roundf((old_g*w_old+obs_weight*new_g)/w_new),255.0f);
         new_r = fmin(roundf((old_r*w_old+obs_weight*new_r)/w_new),255.0f);
-
-        // More accurate method for colors
-        // new_b = sqrt((old_b*old_b*w_old + new_b*new_b*obs_weight)/w_new);
-        // new_g = sqrt((old_g*old_g*w_old + new_g*new_g*obs_weight)/w_new);
-        // new_r = sqrt((old_r*old_r*w_old + new_r*new_r*obs_weight)/w_new);
-        // new_b = fmin(roundf(new_b),255.0f);
-        // new_g = fmin(roundf(new_g),255.0f);
-        // new_r = fmin(roundf(new_r),255.0f);
 
         color_vol[voxel_idx] = new_b*256*256+new_g*256+new_r;
       }}""".format(voxel_size = self._voxel_size,
@@ -252,7 +234,7 @@ class TSDFVolume:
     tsdf_vol, color_vol = self.get_volume()
 
     # Marching cubes
-    verts = measure.marching_cubes(tsdf_vol, mask=np.logical_and(tsdf_vol > -0.5,tsdf_vol < 0.5), level=0)[0]
+    verts = marching_cubes(tsdf_vol, mask=np.logical_and(tsdf_vol > -0.5,tsdf_vol < 0.5), level=0)[0]
     verts_ind = np.round(verts).astype(int)
     verts = verts*self._voxel_size + self._vol_origin
 
@@ -273,7 +255,7 @@ class TSDFVolume:
     tsdf_vol, color_vol = self.get_volume()
 
     # Marching cubes
-    verts, faces, norms, vals = measure.marching_cubes(tsdf_vol, mask=np.logical_and(tsdf_vol > -0.5,tsdf_vol < 0.5), level=0)
+    verts, faces, norms, vals = marching_cubes(tsdf_vol, mask=np.logical_and(tsdf_vol > -0.5,tsdf_vol < 0.5), level=0)
     verts_ind = np.round(verts).astype(int)
     verts = verts*self._voxel_size+self._vol_origin  # voxel grid coordinates to world coordinates
 
