@@ -5,7 +5,6 @@ import time
 
 import cv2
 import numpy as np
-
 import fusion
 
 
@@ -37,7 +36,7 @@ if __name__ == "__main__":
   # ======================================================================================================== #
   # Initialize voxel volume
   print("Initializing voxel volume...")
-  tsdf_vol = fusion.TSDFVolume(vol_bnds, voxel_size=0.02)
+  tsdf_vol = fusion.TSDFVolume(vol_bnds, voxel_size=0.01)
 
   # Loop through RGB-D images and fuse them together
   t0_elapse = time.time()
@@ -52,7 +51,7 @@ if __name__ == "__main__":
     cam_pose = np.loadtxt("data/frame-%06d.pose.txt"%(i))
 
     # Integrate observation into voxel volume (assume color aligned with depth)
-    tsdf_vol.integrate(color_image, depth_im, cam_intr, cam_pose, obs_weight=1.)
+    tsdf_vol.integrate(color_image, depth_im, cam_intr, cam_pose, obs_weight=1.0)
 
   fps = n_imgs / (time.time() - t0_elapse)
   print("Average FPS: {:.2f}".format(fps))

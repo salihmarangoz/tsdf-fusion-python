@@ -73,7 +73,7 @@ class TSDFVolume:
                                 float * vol_origin,
                                 float * cam_intr,
                                 float * cam_pose,
-                                float * other_params,
+                                int gpu_loop_idx,
                                 float * color_im,
                                 float * depth_im) {{
         // Get constant parameters
@@ -86,13 +86,13 @@ class TSDFVolume:
         float trunc_margin = {trunc_margin};
         float obs_weight = {obs_weight};
         float max_depth = {max_depth};
+        float min_depth = {min_depth};
         float cam_intr_0 = {cam_intr_0};
         float cam_intr_2 = {cam_intr_2};
         float cam_intr_4 = {cam_intr_4};
         float cam_intr_5 = {cam_intr_5};
         
         // Get voxel index
-        int gpu_loop_idx = (int) other_params[0];
         int max_threads_per_block = blockDim.x;
         int block_idx = blockIdx.z*gridDim.y*gridDim.x+blockIdx.y*gridDim.x+blockIdx.x;
         int voxel_idx = gpu_loop_idx*gridDim.x*gridDim.y*gridDim.z*max_threads_per_block + block_idx*max_threads_per_block + threadIdx.x;
@@ -101,7 +101,7 @@ class TSDFVolume:
 
         // Get voxel grid coordinates (note: be careful when casting)
         int voxel_x = voxel_idx/(vol_dim_y*vol_dim_z);
-        int voxel_y = (((voxel_idx-voxel_x*vol_dim_y*vol_dim_z))/vol_dim_z);
+        int voxel_y = (voxel_idx-voxel_x*vol_dim_y*vol_dim_z)/vol_dim_z;
         int voxel_z = voxel_idx-voxel_x*vol_dim_y*vol_dim_z-voxel_y*vol_dim_z;
 
         // Voxel grid coordinates to world coordinates
@@ -122,26 +122,21 @@ class TSDFVolume:
         int pixel_y = (int) roundf(cam_intr_4*(cam_pt_y/cam_pt_z)+cam_intr_5);
         
         // Skip if outside view frustum
-        if (pixel_x < 0 || pixel_x >= im_w || pixel_y < 0 || pixel_y >= im_h || cam_pt_z<0)
+        if (pixel_x < 0 || pixel_x >= im_w || pixel_y < 0 || pixel_y >= im_h || cam_pt_z <= min_depth || cam_pt_z >= max_depth)
             return;
 
         // Skip invalid depth
         float depth_value = depth_im[pixel_y*im_w + pixel_x];
-        if (depth_value == 0 || max_depth < depth_value)
+        if (depth_value == 0 || max_depth < depth_value || min_depth > depth_value)
             return;
 
-        // Integrate TSDF
+        
         float depth_diff = depth_value-cam_pt_z;
         if (depth_diff < -trunc_margin)
             return;
-        float dist = -fmin(1.0f,depth_diff/trunc_margin);
-        float w_old = weight_vol[voxel_idx];
-        float w_new = w_old + obs_weight;
-        weight_vol[voxel_idx] = w_new;
-        tsdf_vol[voxel_idx] = (tsdf_vol[voxel_idx]*w_old+obs_weight*dist)/w_new;
 
         // Integrate color
-        // TODO: pixel_x,pixel_y are quantized. Use interpolation instead.
+        // TODO: interpolation?
         float old_color = color_vol[voxel_idx];
         float old_b = floorf(old_color/(256*256));
         float old_g = floorf((old_color-old_b*256*256)/256);
@@ -151,10 +146,24 @@ class TSDFVolume:
         float new_g = floorf((new_color-new_b*256*256)/256);
         float new_r = new_color-new_b*256*256-new_g*256;
 
+        // TODO: something experimental. using tmp_weight instead of obs_weight
+        float color_dist = ((old_b-new_b)*(old_b-new_b) + (old_g-new_g)*(old_g-new_g) + (old_r-new_r)*(old_r-new_r))/65025.0;
+        float tmp_weight = obs_weight*cos(color_dist/3.01);
+
+        // Integrate TSDF
+        float dist = -fmin(1.0f,depth_diff/trunc_margin);
+        float w_old = weight_vol[voxel_idx];
+        float w_new = w_old + tmp_weight;
+        weight_vol[voxel_idx] = w_new;
+        tsdf_vol[voxel_idx] = (tsdf_vol[voxel_idx]*w_old+tmp_weight*dist)/w_new;
+
+        if (depth_diff > trunc_margin) // TODO: truncates between camera and the point for color
+          return;
+
         // Fast method for colors
-        new_b = fmin(roundf((old_b*w_old+obs_weight*new_b)/w_new),255.0f);
-        new_g = fmin(roundf((old_g*w_old+obs_weight*new_g)/w_new),255.0f);
-        new_r = fmin(roundf((old_r*w_old+obs_weight*new_r)/w_new),255.0f);
+        new_b = fmin(roundf((old_b*w_old+tmp_weight*new_b)/w_new),255.0f);
+        new_g = fmin(roundf((old_g*w_old+tmp_weight*new_g)/w_new),255.0f);
+        new_r = fmin(roundf((old_r*w_old+tmp_weight*new_r)/w_new),255.0f);
 
         color_vol[voxel_idx] = new_b*256*256+new_g*256+new_r;
       }}""".format(voxel_size = self._voxel_size,
@@ -166,6 +175,7 @@ class TSDFVolume:
                    im_w = self._im_w,
                    obs_weight = self._obs_weight,
                    max_depth = 5.0,
+                   min_depth = 0.2,
                    cam_intr_0 = self._cam_intr[0],
                    cam_intr_1 = self._cam_intr[1],
                    cam_intr_2 = self._cam_intr[2],
@@ -175,7 +185,7 @@ class TSDFVolume:
                    cam_intr_6 = self._cam_intr[6],
                    cam_intr_7 = self._cam_intr[7],
                    cam_intr_8 = self._cam_intr[8],) 
-    self._cuda_src_mod = SourceModule(cuda_src, options=["--use_fast_math", "-O3", "--extra-device-vectorization"])
+    self._cuda_src_mod = SourceModule(cuda_src, options=["-O3"])
     self._cuda_integrate = self._cuda_src_mod.get_function("integrate")
 
   def integrate(self, color_im, depth_im, cam_intr, cam_pose, obs_weight=1.):
@@ -199,22 +209,15 @@ class TSDFVolume:
     color_im = np.floor(color_im[...,2]*self._color_const + color_im[...,1]*256 + color_im[...,0])
 
     for gpu_loop_idx in range(self._n_gpu_loops):
-      self._cuda_integrate(self._tsdf_vol_gpu,
-                          self._weight_vol_gpu,
-                          self._color_vol_gpu,
+      self._cuda_integrate(self._tsdf_vol_gpu, #io
+                          self._weight_vol_gpu, #io
+                          self._color_vol_gpu, #io
                           cuda.In(self._vol_origin.astype(np.float32)), #dynamic
                           cuda.In(self._cam_intr.reshape(-1).astype(np.float32)), #done
                           cuda.In(cam_pose.reshape(-1).astype(np.float32)), #dynamic
-                          cuda.In(np.asarray([
-                            gpu_loop_idx,
-                            self._voxel_size, #done
-                            self._im_h, #done
-                            self._im_w, #done
-                            self._trunc_margin, #done
-                            self._obs_weight #done
-                          ], np.float32)),
-                          cuda.In(color_im.reshape(-1).astype(np.float32)),
-                          cuda.In(depth_im.reshape(-1).astype(np.float32)),
+                          np.int32(gpu_loop_idx), #dynamic
+                          cuda.In(color_im.reshape(-1).astype(np.float32)), #dynamic
+                          cuda.In(depth_im.reshape(-1).astype(np.float32)), #dynamic
                           block=(self._max_gpu_threads_per_block,1,1),
                           grid=(
                             int(self._max_gpu_grid_dim[0]),
