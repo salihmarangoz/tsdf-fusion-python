@@ -5,6 +5,7 @@ from skimage.measure import marching_cubes
 import pycuda.driver as cuda
 import pycuda.autoinit
 from pycuda.compiler import SourceModule
+#import cv2
 
 class TSDFVolume:
   """Volumetric TSDF Fusion of RGB-D Images.
@@ -75,7 +76,8 @@ class TSDFVolume:
                                 float * cam_pose,
                                 int gpu_loop_idx,
                                 float * color_im,
-                                float * depth_im) {{
+                                float * depth_im/*,
+                                float * render_im*/) {{
         // Get constant parameters
         int vol_dim_x = {vol_dim_x};
         int vol_dim_y = {vol_dim_y};
@@ -122,21 +124,32 @@ class TSDFVolume:
         int pixel_y = (int) roundf(cam_intr_4*(cam_pt_y/cam_pt_z)+cam_intr_5);
         
         // Skip if outside view frustum
-        if (pixel_x < 0 || pixel_x >= im_w || pixel_y < 0 || pixel_y >= im_h || cam_pt_z <= min_depth || cam_pt_z >= max_depth)
+        if (pixel_x < 0 || pixel_x >= im_w || pixel_y < 0 || pixel_y >= im_h)
+            return;
+
+        if (cam_pt_z <= min_depth || cam_pt_z >= max_depth)
             return;
 
         // Skip invalid depth
         float depth_value = depth_im[pixel_y*im_w + pixel_x];
         if (depth_value == 0 || max_depth < depth_value || min_depth > depth_value)
             return;
-
         
         float depth_diff = depth_value-cam_pt_z;
         if (depth_diff < -trunc_margin)
             return;
 
+        // Integrate TSDF
+        float dist = -fmin(1.0f,depth_diff/trunc_margin);
+        float w_old = weight_vol[voxel_idx];
+        float w_new = w_old + obs_weight;
+        weight_vol[voxel_idx] = w_new;
+        tsdf_vol[voxel_idx] = (tsdf_vol[voxel_idx]*w_old+obs_weight*dist)/w_new;
+
+        if (depth_diff > trunc_margin) // do not insert color if the voxel is far away from the surface. reusing trunc_margin here...
+          return;
+
         // Integrate color
-        // TODO: interpolation?
         float old_color = color_vol[voxel_idx];
         float old_b = floorf(old_color/(256*256));
         float old_g = floorf((old_color-old_b*256*256)/256);
@@ -146,24 +159,10 @@ class TSDFVolume:
         float new_g = floorf((new_color-new_b*256*256)/256);
         float new_r = new_color-new_b*256*256-new_g*256;
 
-        // TODO: something experimental. using tmp_weight instead of obs_weight
-        float color_dist = ((old_b-new_b)*(old_b-new_b) + (old_g-new_g)*(old_g-new_g) + (old_r-new_r)*(old_r-new_r))/65025.0;
-        float tmp_weight = obs_weight*cos(color_dist/3.01);
-
-        // Integrate TSDF
-        float dist = -fmin(1.0f,depth_diff/trunc_margin);
-        float w_old = weight_vol[voxel_idx];
-        float w_new = w_old + tmp_weight;
-        weight_vol[voxel_idx] = w_new;
-        tsdf_vol[voxel_idx] = (tsdf_vol[voxel_idx]*w_old+tmp_weight*dist)/w_new;
-
-        if (depth_diff > trunc_margin) // TODO: truncates between camera and the point for color
-          return;
-
         // Fast method for colors
-        new_b = fmin(roundf((old_b*w_old+tmp_weight*new_b)/w_new),255.0f);
-        new_g = fmin(roundf((old_g*w_old+tmp_weight*new_g)/w_new),255.0f);
-        new_r = fmin(roundf((old_r*w_old+tmp_weight*new_r)/w_new),255.0f);
+        new_b = fmin(roundf((old_b*w_old+obs_weight*new_b)/w_new),255.0f);
+        new_g = fmin(roundf((old_g*w_old+obs_weight*new_g)/w_new),255.0f);
+        new_r = fmin(roundf((old_r*w_old+obs_weight*new_r)/w_new),255.0f);
 
         color_vol[voxel_idx] = new_b*256*256+new_g*256+new_r;
       }}""".format(voxel_size = self._voxel_size,
@@ -174,8 +173,8 @@ class TSDFVolume:
                    im_h = self._im_h,
                    im_w = self._im_w,
                    obs_weight = self._obs_weight,
-                   max_depth = 5.0,
-                   min_depth = 0.2,
+                   max_depth = 5.0, # todo
+                   min_depth = 0.1, # todo
                    cam_intr_0 = self._cam_intr[0],
                    cam_intr_1 = self._cam_intr[1],
                    cam_intr_2 = self._cam_intr[2],
@@ -206,6 +205,7 @@ class TSDFVolume:
 
     # Fold RGB color image into a single channel image
     color_im = color_im.astype(np.float32)
+    #render_im = np.zeros_like(depth_im, dtype=np.float32)
     color_im = np.floor(color_im[...,2]*self._color_const + color_im[...,1]*256 + color_im[...,0])
 
     for gpu_loop_idx in range(self._n_gpu_loops):
@@ -218,6 +218,7 @@ class TSDFVolume:
                           np.int32(gpu_loop_idx), #dynamic
                           cuda.In(color_im.reshape(-1).astype(np.float32)), #dynamic
                           cuda.In(depth_im.reshape(-1).astype(np.float32)), #dynamic
+                          #cuda.InOut(render_im.reshape(-1)), #dynamic
                           block=(self._max_gpu_threads_per_block,1,1),
                           grid=(
                             int(self._max_gpu_grid_dim[0]),
@@ -225,6 +226,10 @@ class TSDFVolume:
                             int(self._max_gpu_grid_dim[2]),
                           )
       )
+
+    #render_im = 1.0 - render_im.reshape((self._im_h, self._im_w)) / np.max(render_im)
+    #cv2.imshow("test", render_im)
+    #cv2.waitKey(1)
 
   def get_volume(self):
     cuda.memcpy_dtoh(self._tsdf_vol_cpu, self._tsdf_vol_gpu)
