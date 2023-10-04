@@ -1,3 +1,5 @@
+TODO: check https://github.com/ZiyunClaudeWang/tsdf-fusion-python/blob/master/mesh_from_bag_angle.py
+
 # Volumetric TSDF Fusion of RGB-D Images in Python
 
 <img src="images/fusion-movie.gif" height=250px align="right"/>
